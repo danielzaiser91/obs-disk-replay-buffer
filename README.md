@@ -1,0 +1,23 @@
+# OBS Disk Replay Buffer
+
+Keeps the last 30 minutes of gameplay in 1080p60, like the OBS replay buffer, but on disk instead of in RAM.
+OBS uses about 300 MB RAM and under 1 % CPU. Press **Alt+F10** to save everything since your last save as one video.
+
+Windows only.
+
+## Install
+
+1. Download [replay-buffer.lua](https://github.com/danielzaiser91/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua).
+2. In OBS: **Tools → Scripts → +**, then pick the file.
+3. Click **Set up OBS**, then restart OBS.
+
+From then on, OBS records in the background whenever it runs. Clips are saved to `Videos\Replays`.
+
+## Good to know
+
+- Setup changes the recording settings of your current OBS profile. To keep your old settings, create a new profile first (**Profile → New**).
+- Normal recordings are now the buffer: anything older than 30 minutes gets deleted. Press Alt+F10 to keep it.
+- The buffer is stored in `Videos\Replay Buffer` and uses about 2.5 GB.
+- With an NVIDIA GPU, setup picks HEVC at high quality. Other GPUs keep your current encoder.
+- ffmpeg is downloaded automatically (about 180 MB) to join the pieces into one file.
+- Change the hotkey under **Settings → Hotkeys → Save replay to disk**. Change the buffer length or clip folder in the script settings.
