@@ -210,7 +210,7 @@ end
 -- Splitting by time would split only once with Hybrid MP4 (OBS 33, obs-studio#14051).
 local function set_up(props)
   local cfg = obs.obs_frontend_get_profile_config()
-  local buffer = home .. "/Videos/Replay Buffer"
+  local buffer = home .. "/Videos/Replays/Buffer (auto-deleted)"
   obs.os_mkdirs(buffer)
   obs.config_set_string(cfg, "Output", "Mode", "Advanced")
   obs.config_set_string(cfg, "AdvOut", "RecType", "Standard")

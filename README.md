@@ -20,7 +20,7 @@ Only the last 30 minutes are kept. Press Alt+F10 to save them as a clip to `Vide
 
 - Setup changes the recording settings of your current OBS profile. To keep your old settings, create a new profile first (**Profile → New**).
 - Normal recordings are now the buffer: anything older than 30 minutes gets deleted. Press Alt+F10 to keep it.
-- The buffer is stored in `Videos\Replay Buffer` and uses about 2.5 GB.
+- The buffer is stored in `Videos\Replays\Buffer (auto-deleted)` and uses about 2.5 GB. Those files are not your clips.
 - With an NVIDIA GPU, setup picks HEVC at high quality. Other GPUs keep your current encoder.
 - ffmpeg is downloaded automatically (about 180 MB) to join the pieces into one file.
 - To stop OBS from starting with Windows, open `shell:startup` (Win+R) and delete `OBS Replay Buffer.vbs`.
