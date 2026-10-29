@@ -202,7 +202,7 @@ local function add_autostart()
   local f = io.open(os.getenv("APPDATA") .. "\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\OBS Replay Buffer.vbs", "w")
   f:write('Set sh = CreateObject("WScript.Shell")\n',
           'sh.CurrentDirectory = "', exe:match("^(.*)\\"), '"\n',
-          'sh.Run """', exe, '""", 1, False\n')
+          'sh.Run """', exe, '"" --startrecording", 1, False\n')
   f:close()
 end
 
