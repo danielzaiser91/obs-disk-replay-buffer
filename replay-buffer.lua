@@ -248,7 +248,8 @@ end
 function script_description()
   return "Replay buffer on disk: keeps the last minutes of the recording and saves everything since the last save " ..
          "as one clip (hotkey „Save replay to disk“, default Alt+F10).\n" ..
-         "Click „Set up OBS“ once, then restart OBS."
+         "Click „Set up OBS“ once, then restart OBS.\n" ..
+         "After that, OBS is always recording. That recording is the buffer, so leave it on."
 end
 
 function script_properties()
@@ -256,7 +257,8 @@ function script_properties()
   obs.obs_properties_add_int(p, "buffer_min", "Buffer (minutes)", 1, 600, 1)
   obs.obs_properties_add_path(p, "clip_folder", "Clip folder (same drive as the buffer)", obs.OBS_PATH_DIRECTORY, nil, nil)
   obs.obs_properties_add_button(p, "set_up", "Set up OBS", set_up)
-  local done = obs.obs_properties_add_text(p, "setup_done", "✔ Done. Now close and restart OBS.", obs.OBS_TEXT_INFO)
+  local done = obs.obs_properties_add_text(p, "setup_done", "✔ Done. Now close and restart OBS.\n" ..
+    "OBS will then always be recording. That recording is the buffer, so leave it on. Alt+F10 saves a clip.", obs.OBS_TEXT_INFO)
   obs.obs_property_set_visible(done, false)
   return p
 end
