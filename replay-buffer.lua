@@ -208,7 +208,7 @@ end
 
 -- One-time setup of the active profile: record to the buffer folder in 300 MB pieces.
 -- Splitting by time would split only once with Hybrid MP4 (OBS 33, obs-studio#14051).
-local function set_up()
+local function set_up(props)
   local cfg = obs.obs_frontend_get_profile_config()
   local buffer = home .. "/Videos/Replay Buffer"
   obs.os_mkdirs(buffer)
@@ -241,7 +241,8 @@ local function set_up()
   end
   add_autostart()
   print("Setup done. Restart OBS; from then on it buffers whenever OBS runs. OBS now starts with Windows.")
-  return false
+  obs.obs_property_set_visible(obs.obs_properties_get(props, "setup_done"), true)
+  return true
 end
 
 function script_description()
@@ -255,6 +256,8 @@ function script_properties()
   obs.obs_properties_add_int(p, "buffer_min", "Buffer (minutes)", 1, 600, 1)
   obs.obs_properties_add_path(p, "clip_folder", "Clip folder (same drive as the buffer)", obs.OBS_PATH_DIRECTORY, nil, nil)
   obs.obs_properties_add_button(p, "set_up", "Set up OBS", set_up)
+  local done = obs.obs_properties_add_text(p, "setup_done", "✔ Done. Now close and restart OBS.", obs.OBS_TEXT_INFO)
+  obs.obs_property_set_visible(done, false)
   return p
 end
 
