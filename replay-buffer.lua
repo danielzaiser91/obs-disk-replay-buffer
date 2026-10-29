@@ -17,6 +17,7 @@ int CreateProcessA(const char *app, char *cmd, void *pa, void *ta, int inherit, 
 int GetExitCodeProcess(void *h, uint32_t *code);
 int CloseHandle(void *h);
 uint32_t SearchPathA(const char *path, const char *file, const char *ext, uint32_t len, char *buf, char **part);
+uint32_t GetModuleFileNameA(void *module, char *buf, uint32_t len);
 ]]
 local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
@@ -193,6 +194,18 @@ local function hotkey_pressed(pressed)
   end
 end
 
+-- Starts OBS at Windows login. OBS looks for its files relative to the working
+-- directory, so the shortcut has to set it.
+local function add_autostart()
+  local buf = ffi.new("char[260]")
+  local exe = ffi.string(buf, ffi.C.GetModuleFileNameA(nil, buf, 260))
+  local f = io.open(os.getenv("APPDATA") .. "\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\OBS Replay Buffer.vbs", "w")
+  f:write('Set sh = CreateObject("WScript.Shell")\n',
+          'sh.CurrentDirectory = "', exe:match("^(.*)\\"), '"\n',
+          'sh.Run """', exe, '""", 1, False\n')
+  f:close()
+end
+
 -- One-time setup of the active profile: record to the buffer folder in 300 MB pieces.
 -- Splitting by time would split only once with Hybrid MP4 (OBS 33, obs-studio#14051).
 local function set_up()
@@ -226,7 +239,8 @@ local function set_up()
     if proc then ffi.C.CloseHandle(proc) end
     print("Downloading ffmpeg in the background (about 180 MB).")
   end
-  print("Setup done. Restart OBS; from then on it buffers whenever OBS runs.")
+  add_autostart()
+  print("Setup done. Restart OBS; from then on it buffers whenever OBS runs. OBS now starts with Windows.")
   return false
 end
 

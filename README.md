@@ -11,7 +11,7 @@ Windows only.
 2. In OBS: **Tools → Scripts → +**, then pick the file.
 3. Click **Set up OBS**, then restart OBS.
 
-From then on, OBS records in the background whenever it runs. Clips are saved to `Videos\Replays`.
+From then on, OBS starts with Windows and records in the background whenever it runs. Clips are saved to `Videos\Replays`.
 
 ## Good to know
 
@@ -20,4 +20,6 @@ From then on, OBS records in the background whenever it runs. Clips are saved to
 - The buffer is stored in `Videos\Replay Buffer` and uses about 2.5 GB.
 - With an NVIDIA GPU, setup picks HEVC at high quality. Other GPUs keep your current encoder.
 - ffmpeg is downloaded automatically (about 180 MB) to join the pieces into one file.
+- To stop OBS from starting with Windows, open `shell:startup` (Win+R) and delete `OBS Replay Buffer.vbs`.
+- Keep `replay-buffer.lua` where it is, since OBS loads it from there on every start.
 - Change the hotkey under **Settings → Hotkeys → Save replay to disk**. Change the buffer length or clip folder in the script settings.
