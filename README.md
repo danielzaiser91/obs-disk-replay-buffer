@@ -1,3 +1,5 @@
+![Disk Replay Buffer: 9× less RAM for a 30-minute replay, 1080p60 at high quality, under 1 % CPU, one-click setup](banner.png)
+
 # OBS Disk Replay Buffer
 
 Keeps the last 30 minutes of gameplay in 1080p60, like the OBS replay buffer, but on disk instead of in RAM.
