@@ -15,6 +15,7 @@ Windows only.
 
 From then on, OBS starts with Windows and is **always recording**. That recording is the buffer, so leave it on.
 Only the last 30 minutes are kept. Press Alt+F10 to save them as a clip to `Videos\Replays`.
+While the clip is being saved, a file `Replay … - processing` stands in for it for a few seconds.
 
 ## Good to know
 

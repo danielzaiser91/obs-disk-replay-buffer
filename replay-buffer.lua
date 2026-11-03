@@ -18,9 +18,11 @@ int GetExitCodeProcess(void *h, uint32_t *code);
 int CloseHandle(void *h);
 uint32_t SearchPathA(const char *path, const char *file, const char *ext, uint32_t len, char *buf, char **part);
 uint32_t GetModuleFileNameA(void *module, char *buf, uint32_t len);
+int SetFileAttributesA(const char *path, uint32_t attrs);
 ]]
 local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
+local FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL = 0x2, 0x80
 
 local home = os.getenv("USERPROFILE"):gsub("\\", "/")
 local own_ffmpeg = os.getenv("LOCALAPPDATA"):gsub("\\", "/") .. "/obs-disk-replay-buffer/ffmpeg.exe"
@@ -31,7 +33,7 @@ local clip_folder = ""
 local pieces = {}           -- finished pieces {path, ended}
 local current = nil         -- piece OBS is writing right now
 local save_pending = false
-local jobs = {}             -- running ffmpeg merges {proc, parts, files, target}
+local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, target, placeholder}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
 
 local function run_hidden(cmd)
@@ -68,6 +70,15 @@ local function size(path)
   return n
 end
 
+-- Shows the pieces in the clip folder so nothing is lost.
+local function give_up(j, why)
+  local visible = clip_folder .. "/" .. j.name .. " parts"
+  obs.os_rename(j.parts, visible)
+  ffi.C.SetFileAttributesA(visible, FILE_ATTRIBUTE_NORMAL)
+  obs.os_unlink(j.placeholder)
+  print(why .. ", pieces kept in " .. visible)
+end
+
 local function check_jobs()
   local open = {}
   local code = ffi.new("uint32_t[1]")
@@ -81,12 +92,15 @@ local function check_jobs()
       local total = 0
       for _, f in ipairs(j.files) do total = total + size(f) end
       if code[0] == 0 and size(j.target) >= total * 0.99 then
+        local clip = clip_folder .. "/" .. j.name .. ".mp4"
+        obs.os_rename(j.target, clip)
+        obs.os_unlink(j.placeholder)
         for _, f in ipairs(j.files) do obs.os_unlink(f) end
         obs.os_unlink(j.parts .. "/list.txt")
         obs.os_rmdir(j.parts)
-        print("Saved: " .. j.target)
+        print("Saved: " .. clip)
       else
-        print("Merge incomplete (ffmpeg " .. code[0] .. "), pieces kept in " .. j.parts)
+        give_up(j, "Merge incomplete (ffmpeg " .. code[0] .. ")")
       end
     end
   end
@@ -95,39 +109,40 @@ local function check_jobs()
 end
 
 -- Joins the pieces losslessly (-c copy) into one file; if that fails, the parts folder stays.
-local function merge(parts, files, target)
-  local list = io.open(parts .. "/list.txt", "w")
-  for _, f in ipairs(files) do list:write("file '" .. f .. "'\n") end
+local function merge(j)
+  local list = io.open(j.parts .. "/list.txt", "w")
+  for _, f in ipairs(j.files) do list:write("file '" .. f .. "'\n") end
   list:close()
   local ffmpeg = ffmpeg_path()
-  local proc = ffmpeg and run_hidden('"' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. parts ..
-                                     '/list.txt" -c copy -n "' .. target .. '"')
-  if not proc then
-    print("ffmpeg not found, pieces kept in " .. parts)
-    return
-  end
-  jobs[#jobs + 1] = { proc = proc, parts = parts, files = files, target = target }
+  j.proc = ffmpeg and run_hidden('"' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. j.parts ..
+                                 '/list.txt" -c copy -n "' .. j.target .. '"')
+  if not j.proc then return give_up(j, "ffmpeg not found") end
+  jobs[#jobs + 1] = j
   if #jobs == 1 then obs.timer_add(check_jobs, 1000) end
 end
 
 local function save()
   if #pieces == 0 then return end
   local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
-  local target = clip_folder .. "/" .. name .. ".mp4"
+  local clip = clip_folder .. "/" .. name .. ".mp4"
   obs.os_mkdirs(clip_folder)
   if #pieces == 1 then
-    obs.os_rename(pieces[1].path, target)
-    print("Saved: " .. target)
+    obs.os_rename(pieces[1].path, clip)
+    print("Saved: " .. clip)
   else
-    -- Move them out of the buffer folder first so clean_up cannot delete them while ffmpeg reads.
-    local parts = clip_folder .. "/" .. name .. " parts"
+    -- ffmpeg works in a hidden folder next to the buffer, so the clip folder shows only a placeholder, never a
+    -- half-written clip. Moving the pieces there also keeps clean_up from deleting them while ffmpeg reads.
+    local parts = pieces[1].path:match("^(.*)[/\\]") .. "/" .. name .. " parts"
     obs.os_mkdirs(parts)
+    ffi.C.SetFileAttributesA(parts, FILE_ATTRIBUTE_HIDDEN)
     local files = {}
     for _, p in ipairs(pieces) do
       files[#files + 1] = parts .. "/" .. p.path:match("[^/\\]+$")
       obs.os_rename(p.path, files[#files])
     end
-    merge(parts, files, target)
+    local placeholder = clip_folder .. "/" .. name .. " - processing"
+    io.open(placeholder, "w"):close()
+    merge({ name = name, parts = parts, files = files, target = parts .. "/clip.mp4", placeholder = placeholder })
   end
   pieces = {}
 end
