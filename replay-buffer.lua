@@ -23,6 +23,7 @@ int SetFileAttributesA(const char *path, uint32_t attrs);
 local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
 local FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL = 0x2, 0x80
+local SPLIT_MS = 5 * 60 * 1000
 
 local home = os.getenv("USERPROFILE"):gsub("\\", "/")
 local own_ffmpeg = os.getenv("LOCALAPPDATA"):gsub("\\", "/") .. "/obs-disk-replay-buffer/ffmpeg.exe"
@@ -30,8 +31,9 @@ local FFMPEG_ZIP = "https://github.com/BtbN/FFmpeg-Builds/releases/download/late
 
 local buffer_min = 30
 local clip_folder = ""
-local pieces = {}           -- finished pieces {path, ended}
+local pieces = {}           -- finished pieces {path, started, ended}; started is unknown for pieces from a reload
 local current = nil         -- piece OBS is writing right now
+local current_started = nil
 local save_pending = false
 local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, target, placeholder}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
@@ -89,8 +91,11 @@ local function check_jobs()
     else
       ffi.C.CloseHandle(j.proc)
       -- ffmpeg skips an unreadable piece and still exits with 0; the size gives it away.
+      -- A cut first piece shrinks by an unknown share, so it is left out of the check.
       local total = 0
-      for _, f in ipairs(j.files) do total = total + size(f) end
+      for i, f in ipairs(j.files) do
+        if not (i == 1 and j.cut) then total = total + size(f) end
+      end
       if code[0] == 0 and size(j.target) >= total * 0.99 then
         local clip = clip_folder .. "/" .. j.name .. ".mp4"
         obs.os_rename(j.target, clip)
@@ -111,7 +116,11 @@ end
 -- Joins the pieces losslessly (-c copy) into one file; if that fails, the parts folder stays.
 local function merge(j)
   local list = io.open(j.parts .. "/list.txt", "w")
-  for _, f in ipairs(j.files) do list:write("file '" .. f .. "'\n") end
+  for i, f in ipairs(j.files) do
+    list:write("file '" .. f .. "'\n")
+    -- Starts at the keyframe before the cut, so the clip is at most a few seconds longer than the buffer.
+    if i == 1 and j.cut then list:write("inpoint " .. j.cut .. "\n") end
+  end
   list:close()
   local ffmpeg = ffmpeg_path()
   j.proc = ffmpeg and run_hidden('"' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. j.parts ..
@@ -126,7 +135,11 @@ local function save()
   local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
   local clip = clip_folder .. "/" .. name .. ".mp4"
   obs.os_mkdirs(clip_folder)
-  if #pieces == 1 then
+  -- clean_up keeps a piece as long as it ended within the buffer, so its start may lie further back.
+  local first = pieces[1]
+  local cut = first.started and pieces[#pieces].ended - first.started - buffer_min * 60
+  if not cut or cut <= 0 then cut = nil end
+  if #pieces == 1 and not cut then
     obs.os_rename(pieces[1].path, clip)
     print("Saved: " .. clip)
   else
@@ -142,7 +155,8 @@ local function save()
     end
     local placeholder = clip_folder .. "/" .. name .. " - processing"
     io.open(placeholder, "w"):close()
-    merge({ name = name, parts = parts, files = files, target = parts .. "/clip.mp4", placeholder = placeholder })
+    merge({ name = name, parts = parts, files = files, target = parts .. "/clip.mp4", placeholder = placeholder,
+            cut = cut })
   end
   pieces = {}
 end
@@ -153,13 +167,14 @@ local function save_delayed()
 end
 
 local function finish_piece()
-  if current then pieces[#pieces + 1] = { path = current, ended = os.time() } end
+  if current then pieces[#pieces + 1] = { path = current, started = current_started, ended = os.time() } end
   current = nil
 end
 
 local function file_changed(cd)
   finish_piece()
   current = obs.calldata_string(cd, "next_file")
+  current_started = os.time()
   if save_pending then
     save_pending = false
     -- The muxer closes the old file shortly after the signal.
@@ -169,6 +184,12 @@ local function file_changed(cd)
   end
 end
 
+-- A 300 MB piece lasts 27 min of a calm scene; short pieces keep the buffer folder close to the buffer length.
+-- The size split stays for busy scenes.
+local function split_regularly()
+  if not save_pending then obs.obs_frontend_recording_split_file() end
+end
+
 local function connect_signal(connect)
   local out = obs.obs_frontend_get_recording_output()
   if not out then return end
@@ -176,10 +197,13 @@ local function connect_signal(connect)
   if connect then
     local st = obs.obs_output_get_settings(out)
     current = obs.obs_data_get_string(st, "path")
+    current_started = os.time()
     obs.obs_data_release(st)
     obs.signal_handler_connect(sh, "file_changed", file_changed)
+    obs.timer_add(split_regularly, SPLIT_MS)
   else
     obs.signal_handler_disconnect(sh, "file_changed", file_changed)
+    obs.timer_remove(split_regularly)
   end
   obs.obs_output_release(out)
 end
