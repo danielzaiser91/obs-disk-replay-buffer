@@ -21,9 +21,9 @@ While the clip is being saved, a file `Replay … - processing` stands in for it
 
 - Setup changes the recording settings of your current OBS profile. To keep your old settings, create a new profile first (**Profile → New**).
 - Normal recordings are now the buffer: anything older than 30 minutes gets deleted. Press Alt+F10 to keep it.
-- The buffer is stored in `Videos\Replays\__temp_folder_for_replay_buffer` and uses about 2.5 GB. Leave it alone: old parts are deleted automatically.
+- The buffer lives out of sight in `%LOCALAPPDATA%\obs-disk-replay-buffer\buffer` and uses about 2.5 GB. It is emptied when you stop recording or close OBS.
 - With an NVIDIA GPU, setup picks HEVC at high quality. Other GPUs keep your current encoder.
 - ffmpeg is downloaded automatically (about 180 MB) to join the pieces into one file.
 - To stop OBS from starting with Windows, open `shell:startup` (Win+R) and delete `OBS Replay Buffer.vbs`.
 - Keep `replay-buffer.lua` where it is, since OBS loads it from there on every start.
-- Change the hotkey under **Settings → Hotkeys → Save replay to disk**. Change the buffer length or clip folder in the script settings.
+- Change the hotkey under **Settings → Hotkeys → Save replay to disk**. Change the max clip length or clip folder in the script settings.

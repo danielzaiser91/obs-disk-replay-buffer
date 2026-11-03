@@ -19,14 +19,19 @@ int CloseHandle(void *h);
 uint32_t SearchPathA(const char *path, const char *file, const char *ext, uint32_t len, char *buf, char **part);
 uint32_t GetModuleFileNameA(void *module, char *buf, uint32_t len);
 int SetFileAttributesA(const char *path, uint32_t attrs);
+int MoveFileExA(const char *from, const char *to, uint32_t flags);
 ]]
 local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
-local FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL = 0x2, 0x80
+local FILE_ATTRIBUTE_HIDDEN = 0x2
+local MOVEFILE_COPY_ALLOWED = 0x2
 local SPLIT_MS = 5 * 60 * 1000
 
 local home = os.getenv("USERPROFILE"):gsub("\\", "/")
-local own_ffmpeg = os.getenv("LOCALAPPDATA"):gsub("\\", "/") .. "/obs-disk-replay-buffer/ffmpeg.exe"
+local app_dir = os.getenv("LOCALAPPDATA"):gsub("\\", "/") .. "/obs-disk-replay-buffer"
+local own_ffmpeg = app_dir .. "/ffmpeg.exe"
+-- AppData is hidden in Explorer, so nobody stumbles over the pieces.
+local BUFFER = app_dir .. "/buffer"
 local FFMPEG_ZIP = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip"
 
 local buffer_min = 30
@@ -34,8 +39,9 @@ local clip_folder = ""
 local pieces = {}           -- finished pieces {path, started, ended}; started is unknown for pieces from a reload
 local current = nil         -- piece OBS is writing right now
 local current_started = nil
-local save_pending = false
-local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, target, placeholder}
+local save_pending = false  -- name of the clip waiting for the split
+local saving = nil          -- name of the clip waiting for the muxer to close the old file
+local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, placeholder, cut}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
 
 local function run_hidden(cmd)
@@ -72,12 +78,14 @@ local function size(path)
   return n
 end
 
--- Shows the pieces in the clip folder so nothing is lost.
+-- Moves the pieces into the clip folder so nothing is lost; that may be another drive, hence the copy.
 local function give_up(j, why)
   local visible = clip_folder .. "/" .. j.name .. " parts"
-  obs.os_rename(j.parts, visible)
-  ffi.C.SetFileAttributesA(visible, FILE_ATTRIBUTE_NORMAL)
   obs.os_unlink(j.placeholder)
+  obs.os_mkdirs(visible)
+  for _, f in ipairs(j.files) do ffi.C.MoveFileExA(f, visible .. "/" .. f:match("[^/]+$"), MOVEFILE_COPY_ALLOWED) end
+  obs.os_unlink(j.parts .. "/list.txt")
+  obs.os_rmdir(j.parts)
   print(why .. ", pieces kept in " .. visible)
 end
 
@@ -96,10 +104,9 @@ local function check_jobs()
       for i, f in ipairs(j.files) do
         if not (i == 1 and j.cut) then total = total + size(f) end
       end
-      if code[0] == 0 and size(j.target) >= total * 0.99 then
+      if code[0] == 0 and size(j.placeholder) >= total * 0.99 then
         local clip = clip_folder .. "/" .. j.name .. ".mp4"
-        obs.os_rename(j.target, clip)
-        obs.os_unlink(j.placeholder)
+        obs.os_rename(j.placeholder, clip)
         for _, f in ipairs(j.files) do obs.os_unlink(f) end
         obs.os_unlink(j.parts .. "/list.txt")
         obs.os_rmdir(j.parts)
@@ -113,7 +120,7 @@ local function check_jobs()
   if #jobs == 0 then obs.timer_remove(check_jobs) end
 end
 
--- Joins the pieces losslessly (-c copy) into one file; if that fails, the parts folder stays.
+-- Joins the pieces losslessly (-c copy) into the placeholder; if that fails, the pieces go to the clip folder.
 local function merge(j)
   local list = io.open(j.parts .. "/list.txt", "w")
   for i, f in ipairs(j.files) do
@@ -124,46 +131,52 @@ local function merge(j)
   list:close()
   local ffmpeg = ffmpeg_path()
   j.proc = ffmpeg and run_hidden('"' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. j.parts ..
-                                 '/list.txt" -c copy -n "' .. j.target .. '"')
+                                 '/list.txt" -c copy -f mp4 -y "' .. j.placeholder .. '"')
   if not j.proc then return give_up(j, "ffmpeg not found") end
   jobs[#jobs + 1] = j
   if #jobs == 1 then obs.timer_add(check_jobs, 1000) end
 end
 
-local function save()
-  if #pieces == 0 then return end
+-- The placeholder appears right on the hotkey, so the user sees that the clip is on its way. ffmpeg writes straight
+-- into it; it gets its extension once the clip is complete.
+local function announce_clip()
   local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
-  local clip = clip_folder .. "/" .. name .. ".mp4"
   obs.os_mkdirs(clip_folder)
-  -- clean_up keeps a piece as long as it ended within the buffer, so its start may lie further back.
-  local first = pieces[1]
-  local cut = first.started and pieces[#pieces].ended - first.started - buffer_min * 60
-  if not cut or cut <= 0 then cut = nil end
-  if #pieces == 1 and not cut then
-    obs.os_rename(pieces[1].path, clip)
-    print("Saved: " .. clip)
-  else
-    -- ffmpeg works in a hidden folder next to the buffer, so the clip folder shows only a placeholder, never a
-    -- half-written clip. Moving the pieces there also keeps clean_up from deleting them while ffmpeg reads.
-    local parts = pieces[1].path:match("^(.*)[/\\]") .. "/" .. name .. " parts"
-    obs.os_mkdirs(parts)
-    ffi.C.SetFileAttributesA(parts, FILE_ATTRIBUTE_HIDDEN)
-    local files = {}
-    for _, p in ipairs(pieces) do
-      files[#files + 1] = parts .. "/" .. p.path:match("[^/\\]+$")
-      obs.os_rename(p.path, files[#files])
-    end
-    local placeholder = clip_folder .. "/" .. name .. " - processing"
-    io.open(placeholder, "w"):close()
-    merge({ name = name, parts = parts, files = files, target = parts .. "/clip.mp4", placeholder = placeholder,
-            cut = cut })
+  io.open(clip_folder .. "/" .. name .. " - processing", "w"):close()
+  return name
+end
+
+local function save(name)
+  local placeholder = clip_folder .. "/" .. name .. " - processing"
+  if #pieces == 0 then return obs.os_unlink(placeholder) end
+  -- clean_up runs only at splits and keeps a piece as long as it ended within the buffer, so the pieces may reach
+  -- further back than the clip length.
+  local from = pieces[#pieces].ended - buffer_min * 60
+  while pieces[1].ended <= from do
+    obs.os_unlink(pieces[1].path)
+    table.remove(pieces, 1)
   end
+  local first = pieces[1]
+  local cut = first.started and from - first.started
+  if not cut or cut <= 0 then cut = nil end
+  -- Moving the pieces aside keeps clean_up from deleting them while ffmpeg reads. Hidden for setups whose buffer
+  -- still lies in Videos.
+  local parts = first.path:match("^(.*)[/\\]") .. "/" .. name .. " parts"
+  obs.os_mkdirs(parts)
+  ffi.C.SetFileAttributesA(parts, FILE_ATTRIBUTE_HIDDEN)
+  local files = {}
+  for _, p in ipairs(pieces) do
+    files[#files + 1] = parts .. "/" .. p.path:match("[^/\\]+$")
+    obs.os_rename(p.path, files[#files])
+  end
+  -- Writing in the clip folder also works when it is on another drive than the buffer.
+  merge({ name = name, parts = parts, files = files, placeholder = placeholder, cut = cut })
   pieces = {}
 end
 
 local function save_delayed()
   obs.timer_remove(save_delayed)
-  save()
+  save(saving)
 end
 
 local function finish_piece()
@@ -176,6 +189,7 @@ local function file_changed(cd)
   current = obs.calldata_string(cd, "next_file")
   current_started = os.time()
   if save_pending then
+    saving = save_pending
     save_pending = false
     -- The muxer closes the old file shortly after the signal.
     obs.timer_add(save_delayed, 3000)
@@ -208,28 +222,64 @@ local function connect_signal(connect)
   obs.obs_output_release(out)
 end
 
+local function discard_pieces()
+  for _, p in ipairs(pieces) do obs.os_unlink(p.path) end
+  pieces = {}
+end
+
+-- Only our own folder gets emptied, never a recording folder from a setup that predates it.
+local function buffer_is_ours()
+  local path = obs.config_get_string(obs.obs_frontend_get_profile_config(), "AdvOut", "RecFilePath") or ""
+  return path:gsub("\\", "/"):lower() == BUFFER:lower()
+end
+
+-- Deletes what an earlier session left in the buffer, e.g. after a crash.
+local function sweep_buffer()
+  if not current or not buffer_is_ours() then return end
+  local dir = obs.os_opendir(BUFFER)
+  if not dir then return end
+  local e = obs.os_readdir(dir)
+  while e do
+    local path = BUFFER .. "/" .. e.d_name
+    if not e.directory and path:lower() ~= current:gsub("\\", "/"):lower() then obs.os_unlink(path) end
+    e = obs.os_readdir(dir)
+  end
+  obs.os_closedir(dir)
+end
+
+-- OBS may still be writing the last piece while scripts shut down, so a hidden cmd keeps trying for a minute.
+local function empty_buffer_after_exit()
+  if not buffer_is_ours() then return end
+  local pattern = '"' .. BUFFER:gsub("/", "\\") .. '\\*.mp4"'
+  local proc = run_hidden("cmd /c for /l %i in (1,1,30) do @(del /q " .. pattern .. " 2>nul & if not exist " ..
+                          pattern .. " (exit) else ping -n 3 127.0.0.1 >nul)")
+  if proc then ffi.C.CloseHandle(proc) end
+end
+
 local function on_event(e)
   if e == obs.OBS_FRONTEND_EVENT_FINISHED_LOADING then
     if not obs.obs_frontend_recording_active() then obs.obs_frontend_recording_start() end
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED then
-    -- New buffer: whatever the last recording did not save is discarded.
-    for _, p in ipairs(pieces) do obs.os_unlink(p.path) end
-    pieces = {}
+    discard_pieces()
     connect_signal(true)
+    sweep_buffer()
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
+    -- Stopping ends the buffer; unsaved pieces would only take up space.
     connect_signal(false)
     finish_piece()
-    clean_up()
+    discard_pieces()
+  elseif e == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
+    empty_buffer_after_exit()
   end
 end
 
 local function hotkey_pressed(pressed)
   if not pressed then return end
   if obs.obs_frontend_recording_active() then
-    save_pending = true
+    save_pending = announce_clip()
     obs.obs_frontend_recording_split_file()
   else
-    save()
+    save(announce_clip())
   end
 end
 
@@ -249,11 +299,10 @@ end
 -- Splitting by time would split only once with Hybrid MP4 (OBS 33, obs-studio#14051).
 local function set_up(props)
   local cfg = obs.obs_frontend_get_profile_config()
-  local buffer = home .. "/Videos/Replays/__temp_folder_for_replay_buffer"
-  obs.os_mkdirs(buffer)
+  obs.os_mkdirs(BUFFER)
   obs.config_set_string(cfg, "Output", "Mode", "Advanced")
   obs.config_set_string(cfg, "AdvOut", "RecType", "Standard")
-  obs.config_set_string(cfg, "AdvOut", "RecFilePath", buffer)
+  obs.config_set_string(cfg, "AdvOut", "RecFilePath", BUFFER)
   obs.config_set_string(cfg, "AdvOut", "RecFormat2", "hybrid_mp4")
   obs.config_set_bool(cfg, "AdvOut", "RecSplitFile", true)
   obs.config_set_string(cfg, "AdvOut", "RecSplitFileType", "Size")
@@ -293,8 +342,8 @@ end
 
 function script_properties()
   local p = obs.obs_properties_create()
-  obs.obs_properties_add_int(p, "buffer_min", "Buffer (minutes)", 1, 600, 1)
-  obs.obs_properties_add_path(p, "clip_folder", "Clip folder (same drive as the buffer)", obs.OBS_PATH_DIRECTORY, nil, nil)
+  obs.obs_properties_add_float(p, "buffer_min", "Max clip length (minutes)", 0.5, 600, 0.5)
+  obs.obs_properties_add_path(p, "clip_folder", "Clip folder", obs.OBS_PATH_DIRECTORY, nil, nil)
   obs.obs_properties_add_button(p, "set_up", "Set up OBS", set_up)
   local done = obs.obs_properties_add_text(p, "setup_done", "✔ Done. Now close and restart OBS.\n" ..
     "OBS will then always be recording. That recording is the buffer, so leave it on. Alt+F10 saves a clip.", obs.OBS_TEXT_INFO)
@@ -303,12 +352,12 @@ function script_properties()
 end
 
 function script_defaults(settings)
-  obs.obs_data_set_default_int(settings, "buffer_min", 30)
+  obs.obs_data_set_default_double(settings, "buffer_min", 30)
   obs.obs_data_set_default_string(settings, "clip_folder", home .. "/Videos/Replays")
 end
 
 function script_update(settings)
-  buffer_min = obs.obs_data_get_int(settings, "buffer_min")
+  buffer_min = obs.obs_data_get_double(settings, "buffer_min")
   clip_folder = obs.obs_data_get_string(settings, "clip_folder")
 end
 
