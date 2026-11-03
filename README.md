@@ -17,6 +17,10 @@ From then on, OBS starts with Windows and is **always recording**. That recordin
 Only the last 30 minutes are kept. Press Alt+F10 to save them as a clip to `Videos\Replays`.
 While the clip is being saved, a file `Replay … - processing` stands in for it for a few seconds.
 
+## Update
+
+Download [replay-buffer.lua](https://github.com/danielzaiser91/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua) again, replace the old file with it, then restart OBS.
+
 ## Good to know
 
 - Setup changes the recording settings of your current OBS profile. To keep your old settings, create a new profile first (**Profile → New**).
