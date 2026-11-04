@@ -378,6 +378,9 @@ function script_load(settings)
   obs.obs_hotkey_load(hotkey_id, a)
   obs.obs_data_array_release(a)
   obs.obs_frontend_add_event_callback(on_event)
+  -- OBS refuses to record into a missing folder, e.g. after a cleanup tool removed it. Scripts load before the
+  -- recording starts.
+  if buffer_is_ours() then obs.os_mkdirs(BUFFER) end
   if obs.obs_frontend_recording_active() then connect_signal(true) end
 end
 
