@@ -84,35 +84,56 @@ local function give_up(j, why)
   obs.os_unlink(j.placeholder)
   obs.os_mkdirs(visible)
   for _, f in ipairs(j.files) do ffi.C.MoveFileExA(f, visible .. "/" .. f:match("[^/]+$"), MOVEFILE_COPY_ALLOWED) end
+  -- The ffmpeg log stays with the pieces, so the cause can be looked up later.
+  ffi.C.MoveFileExA(j.parts .. "/ffmpeg.log", visible .. "/ffmpeg.log", MOVEFILE_COPY_ALLOWED)
   obs.os_unlink(j.parts .. "/list.txt")
   obs.os_rmdir(j.parts)
   print(why .. ", pieces kept in " .. visible)
+end
+
+local function read_log(j)
+  local f = io.open(j.parts .. "/ffmpeg.log", "r")
+  if not f then return "" end
+  local text = f:read(2000) or ""
+  f:close()
+  return text
 end
 
 local function check_jobs()
   local open = {}
   local code = ffi.new("uint32_t[1]")
   for _, j in ipairs(jobs) do
-    ffi.C.GetExitCodeProcess(j.proc, code)
-    if code[0] == STILL_ACTIVE then
+    if not j.code then
+      ffi.C.GetExitCodeProcess(j.proc, code)
+      if code[0] ~= STILL_ACTIVE then
+        ffi.C.CloseHandle(j.proc)
+        j.code, j.checks = code[0], 0
+      end
+    end
+    if not j.code then
       open[#open + 1] = j
     else
-      ffi.C.CloseHandle(j.proc)
       -- ffmpeg skips an unreadable piece and still exits with 0; the size gives it away.
       -- A cut first piece shrinks by an unknown share, so it is left out of the check.
       local total = 0
       for i, f in ipairs(j.files) do
         if not (i == 1 and j.cut) then total = total + size(f) end
       end
-      if code[0] == 0 and size(j.placeholder) >= total * 0.99 then
+      local got = size(j.placeholder)
+      if j.code == 0 and got >= total * 0.99 then
         local clip = clip_folder .. "/" .. j.name .. ".mp4"
         obs.os_rename(j.placeholder, clip)
         for _, f in ipairs(j.files) do obs.os_unlink(f) end
         obs.os_unlink(j.parts .. "/list.txt")
+        obs.os_unlink(j.parts .. "/ffmpeg.log")
         obs.os_rmdir(j.parts)
         print("Saved: " .. clip)
+      elseif j.code == 0 and j.checks < 5 then
+        -- A virus scanner or indexer may hold the fresh clip for a moment, so the size reads too small; look again.
+        j.checks = j.checks + 1
+        open[#open + 1] = j
       else
-        give_up(j, "Merge incomplete (ffmpeg " .. code[0] .. ")")
+        give_up(j, ("Merge incomplete (ffmpeg %d, clip %d of %d bytes) %s"):format(j.code, got, total, read_log(j)))
       end
     end
   end
@@ -130,8 +151,10 @@ local function merge(j)
   end
   list:close()
   local ffmpeg = ffmpeg_path()
-  j.proc = ffmpeg and run_hidden('"' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. j.parts ..
-                                 '/list.txt" -c copy -f mp4 -y "' .. j.placeholder .. '"')
+  -- cmd only routes ffmpeg's errors into a log; /s strips the outer quotes and its exit code is ffmpeg's.
+  j.proc = ffmpeg and run_hidden('cmd /s /c ""' .. ffmpeg .. '" -nostdin -v error -f concat -safe 0 -i "' .. j.parts ..
+                                 '/list.txt" -c copy -f mp4 -y "' .. j.placeholder .. '" 2>"' .. j.parts ..
+                                 '/ffmpeg.log""')
   if not j.proc then return give_up(j, "ffmpeg not found") end
   jobs[#jobs + 1] = j
   if #jobs == 1 then obs.timer_add(check_jobs, 1000) end
@@ -176,7 +199,9 @@ end
 
 local function save_delayed()
   obs.timer_remove(save_delayed)
-  save(saving)
+  local name = saving
+  saving = nil
+  save(name)
 end
 
 local function finish_piece()
@@ -267,6 +292,11 @@ local function on_event(e)
     -- Stopping ends the buffer; unsaved pieces would only take up space.
     connect_signal(false)
     finish_piece()
+    -- A clip still waiting for its split gets everything up to the stop instead of a placeholder that never resolves.
+    local name = save_pending or saving
+    save_pending, saving = false, nil
+    obs.timer_remove(save_delayed)
+    if name then save(name) end
     discard_pieces()
   elseif e == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
     empty_buffer_after_exit()
@@ -275,6 +305,12 @@ end
 
 local function hotkey_pressed(pressed)
   if not pressed then return end
+  -- The split waits for the next keyframe (up to 2 s). A second press in that time used to replace the waiting clip's
+  -- name, so its placeholder stayed at "processing" forever.
+  if save_pending or saving then
+    print("A clip is already being saved, hotkey ignored.")
+    return
+  end
   if obs.obs_frontend_recording_active() then
     save_pending = announce_clip()
     obs.obs_frontend_recording_split_file()
