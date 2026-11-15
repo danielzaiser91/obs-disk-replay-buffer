@@ -413,16 +413,21 @@ local function start_extras()
   main.suffix = #in_scene == 1 and " Monitor " .. in_scene[1] or ""
 end
 
+-- The output stops only at the next keyframe and closes its last piece after that, so a fixed wait missed it.
 local function finish_ending()
-  obs.timer_remove(finish_ending)
+  local open = {}
   for _, e in ipairs(ending) do
-    end_track(e.track)
-    release_extra(e)
+    if obs.obs_output_active(e.out) then
+      open[#open + 1] = e
+    else
+      end_track(e.track)
+      release_extra(e)
+    end
   end
-  ending = {}
+  ending = open
+  if #ending == 0 then obs.timer_remove(finish_ending) end
 end
 
--- The last piece is complete only once the output has stopped, so its clip waits a moment like after a split.
 local function end_extras()
   main.suffix = ""
   if #extras == 0 then return end
@@ -431,7 +436,8 @@ local function end_extras()
     ending[#ending + 1] = e
   end
   extras = {}
-  obs.timer_add(finish_ending, 3000)
+  obs.timer_remove(finish_ending)
+  obs.timer_add(finish_ending, 500)
 end
 
 -- Only our own folder gets emptied, never a recording folder from a setup that predates it.
