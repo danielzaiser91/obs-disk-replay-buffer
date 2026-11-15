@@ -36,12 +36,15 @@ local FFMPEG_ZIP = "https://github.com/BtbN/FFmpeg-Builds/releases/download/late
 
 local buffer_min = 30
 local clip_folder = ""
--- The recording whose pieces become clips:
+local per_monitor = false
+-- A recording whose pieces become clips:
 --   pieces   finished pieces {path, started, ended}; started is unknown for pieces from a reload
 --   current  piece OBS is writing right now, started at current_started
 --   pending  name of the clip waiting for the split
 --   saving   name of the clip waiting for the muxer to close the old file
 local main
+local extras = {}           -- recordings of further monitors {track, out, source, view, venc, aenc}
+local ending = {}           -- stopped extras waiting for their last piece
 local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, placeholder, cut}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
 
@@ -203,8 +206,9 @@ local function finish_piece(t)
   t.current = nil
 end
 
-local function new_track()
-  local t = { pieces = {}, pending = false }
+-- suffix tells the clips of several recordings apart, e.g. " Monitor 2".
+local function new_track(suffix)
+  local t = { suffix = suffix, pieces = {}, pending = false }
   t.save_delayed = function()
     obs.timer_remove(t.save_delayed)
     local name = t.saving
@@ -226,12 +230,37 @@ local function new_track()
   end
   return t
 end
-main = new_track()
+main = new_track("")
+
+-- The OBS recording plus, with "One clip per monitor", one recording for each further monitor.
+local function tracks()
+  local all = { main }
+  for _, e in ipairs(extras) do all[#all + 1] = e.track end
+  return all
+end
+
+local function busy()
+  for _, t in ipairs(tracks()) do
+    if t.pending or t.saving then return true end
+  end
+  return false
+end
+
+local function split_output(out)
+  local cd = obs.calldata_create()
+  obs.proc_handler_call(obs.obs_output_get_proc_handler(out), "split_file", cd)
+  obs.calldata_destroy(cd)
+end
+
+local function split_all()
+  obs.obs_frontend_recording_split_file()
+  for _, e in ipairs(extras) do split_output(e.out) end
+end
 
 -- A 300 MB piece lasts 27 min of a calm scene; short pieces keep the buffer folder close to the buffer length.
 -- The size split stays for busy scenes.
 local function split_regularly()
-  if not main.pending then obs.obs_frontend_recording_split_file() end
+  if not busy() then split_all() end
 end
 
 local function connect_signal(connect)
@@ -266,6 +295,140 @@ local function end_track(t)
   obs.timer_remove(t.save_delayed)
   if name then save(t, name) end
   discard_pieces(t)
+end
+
+-- Monitors as Display Capture lists them ("BenQ GL2450: 1920x1080 @ 1920,0"), numbered from left to right.
+local function list_monitors()
+  local props = obs.obs_get_source_properties("monitor_capture")
+  local list = obs.obs_properties_get(props, "monitor_id")
+  local mons = {}
+  for i = 0, obs.obs_property_list_item_count(list) - 1 do
+    local w, h, x, y = obs.obs_property_list_item_name(list, i):match("(%d+)x(%d+) @ (%-?%d+),(%-?%d+)")
+    if w then
+      mons[#mons + 1] = { id = obs.obs_property_list_item_string(list, i), w = tonumber(w), h = tonumber(h),
+                          x = tonumber(x), y = tonumber(y) }
+    end
+  end
+  obs.obs_properties_destroy(props)
+  table.sort(mons, function(a, b) return a.x < b.x or (a.x == b.x and a.y < b.y) end)
+  return mons
+end
+
+-- Monitors the current scene already shows through a visible Display Capture.
+local function monitors_in_scene()
+  local ids = {}
+  local scene_source = obs.obs_frontend_get_current_scene()
+  local items = obs.obs_scene_enum_items(obs.obs_scene_from_source(scene_source)) or {}
+  for _, item in ipairs(items) do
+    local s = obs.obs_sceneitem_get_source(item)
+    if obs.obs_sceneitem_visible(item) and obs.obs_source_get_unversioned_id(s) == "monitor_capture" then
+      local st = obs.obs_source_get_settings(s)
+      ids[obs.obs_data_get_string(st, "monitor_id")] = true
+      obs.obs_data_release(st)
+    end
+  end
+  obs.sceneitem_list_release(items)
+  obs.obs_source_release(scene_source)
+  return ids
+end
+
+-- Same encoder and settings as the OBS recording, so all clips look alike.
+local function copy_encoder(enc, name, mixer)
+  local st = obs.obs_encoder_get_settings(enc)
+  local id = obs.obs_encoder_get_id(enc)
+  local copy = mixer and obs.obs_audio_encoder_create(id, name, st, mixer, nil) or
+               obs.obs_video_encoder_create(id, name, st, nil)
+  obs.obs_data_release(st)
+  return copy
+end
+
+local function release_extra(e)
+  obs.signal_handler_disconnect(obs.obs_output_get_signal_handler(e.out), "file_changed", e.track.file_changed)
+  obs.obs_output_release(e.out)
+  obs.obs_encoder_release(e.venc)
+  obs.obs_encoder_release(e.aenc)
+  obs.obs_view_remove(e.view)
+  obs.obs_view_set_source(e.view, 0, nil)
+  obs.obs_view_destroy(e.view)
+  obs.obs_source_release(e.source)
+end
+
+-- Records one monitor at its own resolution with the audio of the OBS recording, in pieces like the OBS recording.
+local function start_extra(mon, n, rec)
+  local name = "Disk replay Monitor " .. n
+  local st = obs.obs_data_create()
+  obs.obs_data_set_string(st, "monitor_id", mon.id)
+  local e = { source = obs.obs_source_create_private("monitor_capture", name, st), view = obs.obs_view_create() }
+  obs.obs_data_release(st)
+  local ovi = obs.obs_video_info()
+  obs.obs_get_video_info(ovi)
+  ovi.base_width, ovi.base_height, ovi.output_width, ovi.output_height = mon.w, mon.h, mon.w, mon.h
+  obs.obs_view_set_source(e.view, 0, e.source)
+  e.venc = copy_encoder(obs.obs_output_get_video_encoder(rec), name, nil)
+  obs.obs_encoder_set_video(e.venc, obs.obs_view_add2(e.view, ovi))
+  e.aenc = copy_encoder(obs.obs_output_get_audio_encoder(rec, 0), name, 0)
+  obs.obs_encoder_set_audio(e.aenc, obs.obs_get_audio())
+  -- The prefix keeps the pieces apart from the OBS recording's, which splits in the same second.
+  local prefix = "Monitor " .. n .. " "
+  e.track = new_track(" Monitor " .. n)
+  e.track.current = BUFFER .. "/" .. prefix .. os.date("%Y-%m-%d %H-%M-%S") .. ".mp4"
+  e.track.current_started = os.time()
+  st = obs.obs_data_create()
+  obs.obs_data_set_string(st, "path", e.track.current)
+  obs.obs_data_set_string(st, "directory", BUFFER)
+  obs.obs_data_set_string(st, "format", prefix .. "%CCYY-%MM-%DD %hh-%mm-%ss")
+  obs.obs_data_set_string(st, "extension", "mp4")
+  obs.obs_data_set_bool(st, "allow_spaces", true)
+  obs.obs_data_set_bool(st, "split_file", true)
+  obs.obs_data_set_int(st, "max_size_mb",
+                       obs.config_get_int(obs.obs_frontend_get_profile_config(), "AdvOut", "RecSplitFileSize"))
+  e.out = obs.obs_output_create("mp4_output", name, st, nil)
+  obs.obs_data_release(st)
+  obs.obs_output_set_video_encoder(e.out, e.venc)
+  obs.obs_output_set_audio_encoder(e.out, e.aenc, 0)
+  obs.signal_handler_connect(obs.obs_output_get_signal_handler(e.out), "file_changed", e.track.file_changed)
+  obs.os_mkdirs(BUFFER)
+  if not obs.obs_output_start(e.out) then
+    print("Monitor " .. n .. " could not be recorded: " .. (obs.obs_output_get_last_error(e.out) or "unknown error"))
+    return release_extra(e)
+  end
+  extras[#extras + 1] = e
+  print(("Recording Monitor %d (%dx%d at %d,%d) separately."):format(n, mon.w, mon.h, mon.x, mon.y))
+end
+
+-- The OBS recording keeps recording the scene. Each monitor the scene does not show gets its own recording; if the
+-- scene shows exactly one monitor, its clips carry that monitor's number.
+local function start_extras()
+  if not per_monitor or #extras > 0 or not obs.obs_frontend_recording_active() then return end
+  local rec = obs.obs_frontend_get_recording_output()
+  local shown = monitors_in_scene()
+  local in_scene = {}
+  for n, mon in ipairs(list_monitors()) do
+    if shown[mon.id] then in_scene[#in_scene + 1] = n else start_extra(mon, n, rec) end
+  end
+  obs.obs_output_release(rec)
+  main.suffix = #in_scene == 1 and " Monitor " .. in_scene[1] or ""
+end
+
+local function finish_ending()
+  obs.timer_remove(finish_ending)
+  for _, e in ipairs(ending) do
+    end_track(e.track)
+    release_extra(e)
+  end
+  ending = {}
+end
+
+-- The last piece is complete only once the output has stopped, so its clip waits a moment like after a split.
+local function end_extras()
+  main.suffix = ""
+  if #extras == 0 then return end
+  for _, e in ipairs(extras) do
+    obs.obs_output_stop(e.out)
+    ending[#ending + 1] = e
+  end
+  extras = {}
+  obs.timer_add(finish_ending, 3000)
 end
 
 -- Only our own folder gets emptied, never a recording folder from a setup that predates it.
@@ -305,9 +468,11 @@ local function on_event(e)
     discard_pieces(main)
     connect_signal(true)
     sweep_buffer()
+    start_extras()
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
     connect_signal(false)
     end_track(main)
+    end_extras()
   elseif e == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
     empty_buffer_after_exit()
   end
@@ -317,16 +482,16 @@ local function hotkey_pressed(pressed)
   if not pressed then return end
   -- The split waits for the next keyframe (up to 2 s). A second press in that time used to replace the waiting clip's
   -- name, so its placeholder stayed at "processing" forever.
-  if main.pending or main.saving then
+  if busy() then
     print("A clip is already being saved, hotkey ignored.")
     return
   end
   local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
   if obs.obs_frontend_recording_active() then
-    main.pending = announce_clip(name)
-    obs.obs_frontend_recording_split_file()
+    for _, t in ipairs(tracks()) do t.pending = announce_clip(name .. t.suffix) end
+    split_all()
   else
-    save(main, announce_clip(name))
+    save(main, announce_clip(name .. main.suffix))
   end
 end
 
@@ -384,7 +549,8 @@ function script_description()
   return "Replay buffer on disk: keeps the last minutes of the recording and saves everything since the last save " ..
          "as one clip (hotkey „Save replay to disk“, default Alt+F10).\n" ..
          "Click „Set up OBS“ once, then restart OBS.\n" ..
-         "After that, OBS is always recording. That recording is the buffer, so leave it on."
+         "After that, OBS is always recording. That recording is the buffer, so leave it on.\n" ..
+         "„One clip per monitor“ also records every monitor the scene does not show and saves one clip each."
 end
 
 function script_properties()
@@ -395,17 +561,24 @@ function script_properties()
   local done = obs.obs_properties_add_text(p, "setup_done", "✔ Done. Now close and restart OBS.\n" ..
     "OBS will then always be recording. That recording is the buffer, so leave it on. Alt+F10 saves a clip.", obs.OBS_TEXT_INFO)
   obs.obs_property_set_visible(done, false)
+  local pm = obs.obs_properties_add_bool(p, "per_monitor", "One clip per monitor")
+  obs.obs_property_set_long_description(pm, "Records each monitor the scene does not show separately with the same " ..
+    "encoder. The hotkey then saves one clip per monitor (… Monitor 1, … Monitor 2), numbered from left to right. " ..
+    "Takes effect right away while recording.")
   return p
 end
 
 function script_defaults(settings)
   obs.obs_data_set_default_double(settings, "buffer_min", 30)
   obs.obs_data_set_default_string(settings, "clip_folder", home .. "/Videos/Replays")
+  obs.obs_data_set_default_bool(settings, "per_monitor", false)
 end
 
 function script_update(settings)
   buffer_min = obs.obs_data_get_double(settings, "buffer_min")
   clip_folder = obs.obs_data_get_string(settings, "clip_folder")
+  per_monitor = obs.obs_data_get_bool(settings, "per_monitor")
+  if per_monitor then start_extras() else end_extras() end
 end
 
 function script_load(settings)
@@ -428,7 +601,20 @@ function script_load(settings)
   -- OBS refuses to record into a missing folder, e.g. after a cleanup tool removed it. Scripts load before the
   -- recording starts.
   if buffer_is_ours() then obs.os_mkdirs(BUFFER) end
-  if obs.obs_frontend_recording_active() then connect_signal(true) end
+  if obs.obs_frontend_recording_active() then
+    connect_signal(true)
+    start_extras()
+  end
+end
+
+-- Reloading the script must not leave its recordings running without anyone to save them.
+function script_unload()
+  for _, e in ipairs(extras) do
+    obs.obs_output_stop(e.out)
+    release_extra(e)
+  end
+  for _, e in ipairs(ending) do release_extra(e) end
+  extras, ending = {}, {}
 end
 
 function script_save(settings)
