@@ -45,7 +45,7 @@ local per_monitor = false
 local main
 local extras = {}           -- recordings of further monitors {track, out, source, view, venc, aenc}
 local ending = {}           -- stopped extras waiting for their last piece
-local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, placeholder, cut}
+local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, placeholder, cut, seconds}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
 
 local function run_hidden(cmd)
@@ -124,7 +124,9 @@ local function check_jobs()
         if not (i == 1 and j.cut) then total = total + size(f) end
       end
       local got = size(j.placeholder)
-      if j.code == 0 and got >= total * 0.99 then
+      -- Joining drops the fragment headers of the pieces, about 0.4 KB per second at 10 fps. On a quiet monitor
+      -- that exceeds 1 % of the size (measured 15.11.2026), so the allowance also grows with the clip length.
+      if j.code == 0 and got >= total * 0.99 - 2048 * j.seconds then
         local clip = clip_folder .. "/" .. j.name .. ".mp4"
         obs.os_rename(j.placeholder, clip)
         for _, f in ipairs(j.files) do obs.os_unlink(f) end
@@ -197,7 +199,8 @@ local function save(t, name)
     obs.os_rename(p.path, files[#files])
   end
   -- Writing in the clip folder also works when it is on another drive than the buffer.
-  merge({ name = name, parts = parts, files = files, placeholder = placeholder, cut = cut })
+  local seconds = pieces[#pieces].ended - math.max(from, first.started or from)
+  merge({ name = name, parts = parts, files = files, placeholder = placeholder, cut = cut, seconds = seconds })
   t.pieces = {}
 end
 
