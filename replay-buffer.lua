@@ -36,11 +36,12 @@ local FFMPEG_ZIP = "https://github.com/BtbN/FFmpeg-Builds/releases/download/late
 
 local buffer_min = 30
 local clip_folder = ""
-local pieces = {}           -- finished pieces {path, started, ended}; started is unknown for pieces from a reload
-local current = nil         -- piece OBS is writing right now
-local current_started = nil
-local save_pending = false  -- name of the clip waiting for the split
-local saving = nil          -- name of the clip waiting for the muxer to close the old file
+-- The recording whose pieces become clips:
+--   pieces   finished pieces {path, started, ended}; started is unknown for pieces from a reload
+--   current  piece OBS is writing right now, started at current_started
+--   pending  name of the clip waiting for the split
+--   saving   name of the clip waiting for the muxer to close the old file
+local main
 local jobs = {}             -- running ffmpeg merges {proc, name, parts, files, placeholder, cut}
 local hotkey_id = obs.OBS_INVALID_HOTKEY_ID
 
@@ -61,13 +62,13 @@ local function ffmpeg_path()
   return nil
 end
 
-local function clean_up()
+local function clean_up(t)
   local limit = os.time() - buffer_min * 60
   local rest = {}
-  for _, p in ipairs(pieces) do
+  for _, p in ipairs(t.pieces) do
     if p.ended < limit then obs.os_unlink(p.path) else rest[#rest + 1] = p end
   end
-  pieces = rest
+  t.pieces = rest
 end
 
 local function size(path)
@@ -169,7 +170,8 @@ local function announce_clip()
   return name
 end
 
-local function save(name)
+local function save(t, name)
+  local pieces = t.pieces
   local placeholder = clip_folder .. "/" .. name .. " - processing"
   if #pieces == 0 then return obs.os_unlink(placeholder) end
   -- clean_up runs only at splits and keeps a piece as long as it ended within the buffer, so the pieces may reach
@@ -194,39 +196,43 @@ local function save(name)
   end
   -- Writing in the clip folder also works when it is on another drive than the buffer.
   merge({ name = name, parts = parts, files = files, placeholder = placeholder, cut = cut })
-  pieces = {}
+  t.pieces = {}
 end
 
-local function save_delayed()
-  obs.timer_remove(save_delayed)
-  local name = saving
-  saving = nil
-  save(name)
+local function finish_piece(t)
+  if t.current then t.pieces[#t.pieces + 1] = { path = t.current, started = t.current_started, ended = os.time() } end
+  t.current = nil
 end
 
-local function finish_piece()
-  if current then pieces[#pieces + 1] = { path = current, started = current_started, ended = os.time() } end
-  current = nil
-end
-
-local function file_changed(cd)
-  finish_piece()
-  current = obs.calldata_string(cd, "next_file")
-  current_started = os.time()
-  if save_pending then
-    saving = save_pending
-    save_pending = false
-    -- The muxer closes the old file shortly after the signal.
-    obs.timer_add(save_delayed, 3000)
-  else
-    clean_up()
+local function new_track()
+  local t = { pieces = {}, pending = false }
+  t.save_delayed = function()
+    obs.timer_remove(t.save_delayed)
+    local name = t.saving
+    t.saving = nil
+    save(t, name)
   end
+  t.file_changed = function(cd)
+    finish_piece(t)
+    t.current = obs.calldata_string(cd, "next_file")
+    t.current_started = os.time()
+    if t.pending then
+      t.saving = t.pending
+      t.pending = false
+      -- The muxer closes the old file shortly after the signal.
+      obs.timer_add(t.save_delayed, 3000)
+    else
+      clean_up(t)
+    end
+  end
+  return t
 end
+main = new_track()
 
 -- A 300 MB piece lasts 27 min of a calm scene; short pieces keep the buffer folder close to the buffer length.
 -- The size split stays for busy scenes.
 local function split_regularly()
-  if not save_pending then obs.obs_frontend_recording_split_file() end
+  if not main.pending then obs.obs_frontend_recording_split_file() end
 end
 
 local function connect_signal(connect)
@@ -235,21 +241,21 @@ local function connect_signal(connect)
   local sh = obs.obs_output_get_signal_handler(out)
   if connect then
     local st = obs.obs_output_get_settings(out)
-    current = obs.obs_data_get_string(st, "path")
-    current_started = os.time()
+    main.current = obs.obs_data_get_string(st, "path")
+    main.current_started = os.time()
     obs.obs_data_release(st)
-    obs.signal_handler_connect(sh, "file_changed", file_changed)
+    obs.signal_handler_connect(sh, "file_changed", main.file_changed)
     obs.timer_add(split_regularly, SPLIT_MS)
   else
-    obs.signal_handler_disconnect(sh, "file_changed", file_changed)
+    obs.signal_handler_disconnect(sh, "file_changed", main.file_changed)
     obs.timer_remove(split_regularly)
   end
   obs.obs_output_release(out)
 end
 
-local function discard_pieces()
-  for _, p in ipairs(pieces) do obs.os_unlink(p.path) end
-  pieces = {}
+local function discard_pieces(t)
+  for _, p in ipairs(t.pieces) do obs.os_unlink(p.path) end
+  t.pieces = {}
 end
 
 -- Only our own folder gets emptied, never a recording folder from a setup that predates it.
@@ -260,6 +266,7 @@ end
 
 -- Deletes what an earlier session left in the buffer, e.g. after a crash.
 local function sweep_buffer()
+  local current = main.current
   if not current or not buffer_is_ours() then return end
   local dir = obs.os_opendir(BUFFER)
   if not dir then return end
@@ -285,19 +292,19 @@ local function on_event(e)
   if e == obs.OBS_FRONTEND_EVENT_FINISHED_LOADING then
     if not obs.obs_frontend_recording_active() then obs.obs_frontend_recording_start() end
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED then
-    discard_pieces()
+    discard_pieces(main)
     connect_signal(true)
     sweep_buffer()
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
     -- Stopping ends the buffer; unsaved pieces would only take up space.
     connect_signal(false)
-    finish_piece()
+    finish_piece(main)
     -- A clip still waiting for its split gets everything up to the stop instead of a placeholder that never resolves.
-    local name = save_pending or saving
-    save_pending, saving = false, nil
-    obs.timer_remove(save_delayed)
-    if name then save(name) end
-    discard_pieces()
+    local name = main.pending or main.saving
+    main.pending, main.saving = false, nil
+    obs.timer_remove(main.save_delayed)
+    if name then save(main, name) end
+    discard_pieces(main)
   elseif e == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
     empty_buffer_after_exit()
   end
@@ -307,15 +314,15 @@ local function hotkey_pressed(pressed)
   if not pressed then return end
   -- The split waits for the next keyframe (up to 2 s). A second press in that time used to replace the waiting clip's
   -- name, so its placeholder stayed at "processing" forever.
-  if save_pending or saving then
+  if main.pending or main.saving then
     print("A clip is already being saved, hotkey ignored.")
     return
   end
   if obs.obs_frontend_recording_active() then
-    save_pending = announce_clip()
+    main.pending = announce_clip()
     obs.obs_frontend_recording_split_file()
   else
-    save(announce_clip())
+    save(main, announce_clip())
   end
 end
 
@@ -400,7 +407,7 @@ end
 function script_load(settings)
   -- Pieces from the last OBS session, so the next recording start discards them.
   for ended, path in obs.obs_data_get_string(settings, "pieces"):gmatch("(%d+)|([^\n]+)") do
-    pieces[#pieces + 1] = { path = path, ended = tonumber(ended) }
+    main.pieces[#main.pieces + 1] = { path = path, ended = tonumber(ended) }
   end
   hotkey_id = obs.obs_hotkey_register_frontend("disk_replay_save", "Save replay to disk", hotkey_pressed)
   local a = obs.obs_data_get_array(settings, "hotkey_save")
@@ -422,8 +429,8 @@ end
 
 function script_save(settings)
   local lines = {}
-  for _, p in ipairs(pieces) do lines[#lines + 1] = p.ended .. "|" .. p.path end
-  if current then lines[#lines + 1] = os.time() .. "|" .. current end
+  for _, p in ipairs(main.pieces) do lines[#lines + 1] = p.ended .. "|" .. p.path end
+  if main.current then lines[#lines + 1] = os.time() .. "|" .. main.current end
   obs.obs_data_set_string(settings, "pieces", table.concat(lines, "\n"))
   local a = obs.obs_hotkey_save(hotkey_id)
   obs.obs_data_set_array(settings, "hotkey_save", a)
