@@ -163,8 +163,7 @@ end
 
 -- The placeholder appears right on the hotkey, so the user sees that the clip is on its way. ffmpeg writes straight
 -- into it; it gets its extension once the clip is complete.
-local function announce_clip()
-  local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
+local function announce_clip(name)
   obs.os_mkdirs(clip_folder)
   io.open(clip_folder .. "/" .. name .. " - processing", "w"):close()
   return name
@@ -258,6 +257,17 @@ local function discard_pieces(t)
   t.pieces = {}
 end
 
+-- Stopping ends the buffer; unsaved pieces would only take up space.
+local function end_track(t)
+  finish_piece(t)
+  -- A clip still waiting for its split gets everything up to the stop instead of a placeholder that never resolves.
+  local name = t.pending or t.saving
+  t.pending, t.saving = false, nil
+  obs.timer_remove(t.save_delayed)
+  if name then save(t, name) end
+  discard_pieces(t)
+end
+
 -- Only our own folder gets emptied, never a recording folder from a setup that predates it.
 local function buffer_is_ours()
   local path = obs.config_get_string(obs.obs_frontend_get_profile_config(), "AdvOut", "RecFilePath") or ""
@@ -296,15 +306,8 @@ local function on_event(e)
     connect_signal(true)
     sweep_buffer()
   elseif e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
-    -- Stopping ends the buffer; unsaved pieces would only take up space.
     connect_signal(false)
-    finish_piece(main)
-    -- A clip still waiting for its split gets everything up to the stop instead of a placeholder that never resolves.
-    local name = main.pending or main.saving
-    main.pending, main.saving = false, nil
-    obs.timer_remove(main.save_delayed)
-    if name then save(main, name) end
-    discard_pieces(main)
+    end_track(main)
   elseif e == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
     empty_buffer_after_exit()
   end
@@ -318,11 +321,12 @@ local function hotkey_pressed(pressed)
     print("A clip is already being saved, hotkey ignored.")
     return
   end
+  local name = "Replay " .. os.date("%Y-%m-%d %H-%M-%S")
   if obs.obs_frontend_recording_active() then
-    main.pending = announce_clip()
+    main.pending = announce_clip(name)
     obs.obs_frontend_recording_split_file()
   else
-    save(main, announce_clip())
+    save(main, announce_clip(name))
   end
 end
 
