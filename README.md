@@ -9,7 +9,7 @@ Windows only.
 
 ## Install
 
-1. Download [replay-buffer.lua](https://github.com/danielzaiser91/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua).
+1. Download [replay-buffer.lua](https://github.com/derNamenloseDaniel/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua).
 2. In OBS: **Tools → Scripts → +**, then pick the file.
 3. Click **Set up OBS**, then restart OBS.
 
@@ -39,7 +39,7 @@ encoding while you play. Separate recordings are joined without encoding again, 
 
 ## Update
 
-Download [replay-buffer.lua](https://github.com/danielzaiser91/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua) again, replace the old file with it, then restart OBS.
+Download [replay-buffer.lua](https://github.com/derNamenloseDaniel/obs-disk-replay-buffer/releases/latest/download/replay-buffer.lua) again, replace the old file with it, then restart OBS.
 
 ## Good to know
 
